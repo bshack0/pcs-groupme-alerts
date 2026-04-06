@@ -27,6 +27,38 @@ function getSundayDateKey(serviceTime) {
   return format(localDate, 'yyyy-MM-dd');
 }
 
+function normalizeTeamKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase();
+}
+
+function getConfiguredTeamRules() {
+  const rules = Array.isArray(config.teams.rules) ? config.teams.rules : [];
+  if (rules.length > 0) {
+    return rules;
+  }
+  const names = Array.isArray(config.teams.names) ? config.teams.names : [];
+  return names.map((name) => ({
+    label: name,
+    match: normalizeTeamKey(name),
+    signUpUrl: '',
+  }));
+}
+
+function getSignUpUrlForTeam(teamRule, teamName) {
+  const byRule = teamRule && teamRule.signUpUrl ? String(teamRule.signUpUrl) : '';
+  if (byRule) return byRule;
+
+  const key = normalizeTeamKey(teamName);
+  const byExact = config.teams.signUpUrls && config.teams.signUpUrls[key];
+  if (byExact) return byExact;
+
+  return (
+    (config.teams.signUpUrls && config.teams.signUpUrls.defaultSignUpUrl) || ''
+  );
+}
+
 function formatScheduleMessage(members, targetDate, formatTimeFn, neededPositions = []) {
   // Get the target date key (YYYY-MM-DD format) using local date
   const targetDateKey = targetDate instanceof Date && !Number.isNaN(targetDate.getTime())
@@ -52,27 +84,6 @@ function formatScheduleMessage(members, targetDate, formatTimeFn, neededPosition
     byDate[dateKey].push(m);
   }
   
-  // Group needed positions by date and create a lookup by team+time
-  const neededByDate = {};
-  const neededLookup = {}; // Key: dateKey|teamName|timeKey -> quantity
-  for (const np of neededPositions) {
-    const dateKey = getSundayDateKey(np.serviceTime);
-    if (!dateKey) continue;
-    
-    // Only include needed positions for the target date
-    if (targetDateKey && dateKey !== targetDateKey) {
-      continue;
-    }
-    
-    if (!neededByDate[dateKey]) neededByDate[dateKey] = [];
-    neededByDate[dateKey].push(np);
-    
-    // Create lookup key: team name + time (using ISO string for time comparison)
-    const timeKey = np.serviceTime ? np.serviceTime.toISOString() : 'TBD';
-    const lookupKey = `${dateKey}|${np.teamName}|${timeKey}`;
-    neededLookup[lookupKey] = (neededLookup[lookupKey] || 0) + (np.quantity || 1);
-  }
-
   const lines = [];
 
   function pushLine(line) {
@@ -98,24 +109,13 @@ function formatScheduleMessage(members, targetDate, formatTimeFn, neededPosition
       continue;
     }
     
-    // Group by team for this date
-    const medicalTeam = [];
-    const securityTeam = [];
-    const otherTeams = {};
-
-    for (const m of dateMembers) {
-      const teamName = (m.teamName || '').toLowerCase();
-      if (teamName.includes('medical')) {
-        medicalTeam.push(m);
-      } else if (teamName.includes('security')) {
-        securityTeam.push(m);
-      } else {
-        if (!otherTeams[m.teamName]) otherTeams[m.teamName] = [];
-        otherTeams[m.teamName].push(m);
-      }
+    const teamRules = getConfiguredTeamRules();
+    const teamBuckets = {};
+    for (const rule of teamRules) {
+      teamBuckets[rule.match] = [];
     }
 
-    // Sort each team by service time (lowest to highest)
+    // Sort by service time (lowest to highest)
     function sortByTime(a, b) {
       if (!a.serviceTime && !b.serviceTime) return 0;
       if (!a.serviceTime) return 1; // TBD goes to end
@@ -123,14 +123,15 @@ function formatScheduleMessage(members, targetDate, formatTimeFn, neededPosition
       return a.serviceTime.getTime() - b.serviceTime.getTime();
     }
 
-    medicalTeam.sort(sortByTime);
-    securityTeam.sort(sortByTime);
-    for (const teamName in otherTeams) {
-      otherTeams[teamName].sort(sortByTime);
+    for (const m of dateMembers) {
+      const memberTeamName = normalizeTeamKey(m.teamName);
+      const rule = teamRules.find((r) => memberTeamName.includes(r.match));
+      if (!rule) continue;
+      teamBuckets[rule.match].push(m);
     }
 
     // Helper to add a member line
-    function addMemberLine(teamLabel, member) {
+    function addMemberLine(member) {
       const timeText = member.serviceTime ? formatTimeFn(member.serviceTime) : 'TBD';
       const emoji = statusToEmoji(member.status);
       const displayName = member.personName || 'Unknown';
@@ -147,247 +148,62 @@ function formatScheduleMessage(members, targetDate, formatTimeFn, neededPosition
       pushLine(line);
     }
 
-    // Format Medical team - use needed positions to determine open slots
-    const medicalConfirmed = medicalTeam.filter(m => m.status !== 'declined');
-    const medicalDeclined = medicalTeam.filter(m => m.status === 'declined');
-    
-    // Count needed positions and confirmed by time slot
-    const medicalNeededByTime = {}; // timeKey -> quantity needed
-    const medicalConfirmedByTime = {}; // timeKey -> count confirmed
-    
-    // Get needed positions for medical team
-    const medicalNeeded = neededPositions.filter(np => {
-      const teamName = (np.teamName || '').toLowerCase();
-      return teamName.includes('medical');
-    });
-    
-    for (const np of medicalNeeded) {
-      const npDateKey = getSundayDateKey(np.serviceTime);
-      if (npDateKey !== dateKey) continue;
-      const timeKey = np.serviceTime ? np.serviceTime.toISOString() : 'TBD';
-      medicalNeededByTime[timeKey] = (medicalNeededByTime[timeKey] || 0) + (np.quantity || 1);
-    }
-    
-    // Count confirmed, pending, and declined by time
-    const medicalPendingByTime = {};
-    const medicalDeclinedByTime = {};
-    for (const m of medicalConfirmed) {
-      const timeKey = m.serviceTime ? m.serviceTime.toISOString() : 'TBD';
-      medicalConfirmedByTime[timeKey] = (medicalConfirmedByTime[timeKey] || 0) + 1;
-    }
-    for (const m of medicalTeam.filter(m => m.status === 'pending')) {
-      const timeKey = m.serviceTime ? m.serviceTime.toISOString() : 'TBD';
-      medicalPendingByTime[timeKey] = (medicalPendingByTime[timeKey] || 0) + 1;
-    }
-    for (const m of medicalDeclined) {
-      const timeKey = m.serviceTime ? m.serviceTime.toISOString() : 'TBD';
-      medicalDeclinedByTime[timeKey] = (medicalDeclinedByTime[timeKey] || 0) + 1;
-    }
-    
-    // Calculate open positions needed: needed - confirmed
-    // NOTE: medicalConfirmed includes both confirmed AND pending (filters out only declined)
-    // ONLY use needed positions from Planning Center - don't infer from declined assignments
-    const medicalOpenByTime = {};
-    for (const timeKey in medicalNeededByTime) {
-      const needed = medicalNeededByTime[timeKey];
-      const confirmed = medicalConfirmedByTime[timeKey] || 0;
-      const open = needed - confirmed;
-      if (open > 0) {
-        medicalOpenByTime[timeKey] = open;
-      }
-    }
-    
-    if (medicalConfirmed.length > 0 || Object.keys(medicalOpenByTime).length > 0) {
-      pushLine('⚕️ Medical Team:');
-      
-      // Combine all members and open positions, sort by time
-      const allMedical = [
-        ...medicalConfirmed.map(m => ({ ...m, isOpen: false, isNeeded: false })),
-      ];
-      
-      // Add open positions based on needed - confirmed
-      for (const timeKey in medicalOpenByTime) {
-        const openCount = medicalOpenByTime[timeKey];
-        const serviceTime = timeKey !== 'TBD' ? new Date(timeKey) : null;
-        for (let i = 0; i < openCount; i++) {
-          allMedical.push({
-            serviceTime,
-            isOpen: true,
-            isNeeded: true,
-          });
-        }
-      }
-      
-      allMedical.sort((a, b) => {
-        if (!a.serviceTime && !b.serviceTime) return 0;
-        if (!a.serviceTime) return 1;
-        if (!b.serviceTime) return -1;
-        return a.serviceTime.getTime() - b.serviceTime.getTime();
-      });
-      
-      // Display all members and open positions sorted by time
-      for (const m of allMedical) {
-        if (m.isOpen) {
-          addOpenPositionLine(m);
-        } else {
-          addMemberLine('medical', m);
-        }
-      }
-      
-      // Add sign-up URL at bottom of team section if there are open positions
-      if (Object.keys(medicalOpenByTime).length > 0) {
-        const signUpUrl = config.teams.signUpUrls['medical'] || 
-                         config.teams.signUpUrls['medical response'] || 
-                         config.teams.signUpUrls.defaultSignUpUrl || '';
-        if (signUpUrl) {
-          pushLine(`Sign up: ${signUpUrl}`);
-        }
-      }
-      
-      pushLine(''); // Blank line after Medical team
-    }
+    for (const rule of teamRules) {
+      const membersForTeam = (teamBuckets[rule.match] || []).sort(sortByTime);
 
-    // Format Security team - use needed positions to determine open slots
-    const securityConfirmed = securityTeam.filter(m => m.status !== 'declined');
-    const securityDeclined = securityTeam.filter(m => m.status === 'declined');
-    
-    // Count needed positions and confirmed by time slot
-    const securityNeededByTime = {}; // timeKey -> quantity needed
-    const securityConfirmedByTime = {}; // timeKey -> count confirmed
-    
-    // Get needed positions for security team
-    const securityNeeded = neededPositions.filter(np => {
-      const teamName = (np.teamName || '').toLowerCase();
-      return teamName.includes('security');
-    });
-    
-    for (const np of securityNeeded) {
-      const npDateKey = getSundayDateKey(np.serviceTime);
-      if (npDateKey !== dateKey) continue;
-      const timeKey = np.serviceTime ? np.serviceTime.toISOString() : 'TBD';
-      securityNeededByTime[timeKey] = (securityNeededByTime[timeKey] || 0) + (np.quantity || 1);
-    }
-    
-    // Count confirmed, pending, and declined by time
-    const securityPendingByTime = {};
-    const securityDeclinedByTime = {};
-    for (const m of securityConfirmed) {
-      const timeKey = m.serviceTime ? m.serviceTime.toISOString() : 'TBD';
-      securityConfirmedByTime[timeKey] = (securityConfirmedByTime[timeKey] || 0) + 1;
-    }
-    for (const m of securityTeam.filter(m => m.status === 'pending')) {
-      const timeKey = m.serviceTime ? m.serviceTime.toISOString() : 'TBD';
-      securityPendingByTime[timeKey] = (securityPendingByTime[timeKey] || 0) + 1;
-    }
-    for (const m of securityDeclined) {
-      const timeKey = m.serviceTime ? m.serviceTime.toISOString() : 'TBD';
-      securityDeclinedByTime[timeKey] = (securityDeclinedByTime[timeKey] || 0) + 1;
-    }
-    
-    // Calculate open positions needed: needed - confirmed
-    // NOTE: securityConfirmed includes both confirmed AND pending (filters out only declined)
-    // ONLY use needed positions from Planning Center - don't infer from declined assignments
-    const securityOpenByTime = {};
-    for (const timeKey in securityNeededByTime) {
-      const needed = securityNeededByTime[timeKey];
-      const confirmed = securityConfirmedByTime[timeKey] || 0;
-      const open = needed - confirmed;
-      if (open > 0) {
-        securityOpenByTime[timeKey] = open;
-      }
-    }
-    
-    if (securityConfirmed.length > 0 || Object.keys(securityOpenByTime).length > 0) {
-      pushLine('🛡️ Security Team:');
-      
-      // Combine all members and open positions, sort by time
-      const allSecurity = [
-        ...securityConfirmed.map(m => ({ ...m, isOpen: false, isNeeded: false })),
-      ];
-      
-      // Add open positions based on needed - confirmed
-      for (const timeKey in securityOpenByTime) {
-        const openCount = securityOpenByTime[timeKey];
-        const serviceTime = timeKey !== 'TBD' ? new Date(timeKey) : null;
-        for (let i = 0; i < openCount; i++) {
-          allSecurity.push({
-            serviceTime,
-            isOpen: true,
-            isNeeded: true,
-          });
-        }
-      }
-      
-      allSecurity.sort((a, b) => {
-        if (!a.serviceTime && !b.serviceTime) return 0;
-        if (!a.serviceTime) return 1;
-        if (!b.serviceTime) return -1;
-        return a.serviceTime.getTime() - b.serviceTime.getTime();
+      const confirmedOrPending = membersForTeam.filter((m) => m.status !== 'declined');
+      const neededForTeam = neededPositions.filter((np) => {
+        const npDateKey = getSundayDateKey(np.serviceTime);
+        if (npDateKey !== dateKey) return false;
+        const npTeamName = normalizeTeamKey(np.teamName);
+        return npTeamName.includes(rule.match);
       });
-      
-      // Display all members and open positions sorted by time
-      for (const m of allSecurity) {
-        if (m.isOpen) {
-          addOpenPositionLine(m);
-        } else {
-          addMemberLine('security', m);
-        }
-      }
-      
-      // Add sign-up URL at bottom of team section if there are open positions
-      if (Object.keys(securityOpenByTime).length > 0) {
-        const signUpUrl = config.teams.signUpUrls['security'] || 
-                         config.teams.signUpUrls['security response'] || 
-                         config.teams.signUpUrls.defaultSignUpUrl || '';
-        if (signUpUrl) {
-          pushLine(`Sign up: ${signUpUrl}`);
-        }
-      }
-      
-      pushLine(''); // Blank line after Security team
-    }
 
-    // Format other teams (if any) - combine confirmed and declined, sort by time
-    for (const teamName in otherTeams) {
-      const teamMembers = otherTeams[teamName];
-      const confirmed = teamMembers.filter(m => m.status !== 'declined');
-      const declined = teamMembers.filter(m => m.status === 'declined');
-      
-      if (confirmed.length > 0 || declined.length > 0) {
-        pushLine(`👥 ${teamName.toUpperCase()}:`);
-        
-        // Combine all members (confirmed + declined as open positions) and sort by time
-        const allTeamMembers = [
-          ...confirmed.map(m => ({ ...m, isOpen: false })),
-          ...declined.map(m => ({ ...m, isOpen: true }))
-        ].sort((a, b) => {
-          if (!a.serviceTime && !b.serviceTime) return 0;
-          if (!a.serviceTime) return 1;
-          if (!b.serviceTime) return -1;
-          return a.serviceTime.getTime() - b.serviceTime.getTime();
-        });
-        
-        // Display all members sorted by time
-        for (const m of allTeamMembers) {
-          if (m.isOpen) {
-            addOpenPositionLine(m);
-          } else {
-            addMemberLine(teamName, m);
-          }
-        }
-        
-        // Add sign-up URL at bottom of team section if there are open positions
-        if (declined.length > 0) {
-          const teamKey = teamName.toLowerCase();
-          const signUpUrl = config.teams.signUpUrls[teamKey] || 
-                           config.teams.signUpUrls.defaultSignUpUrl || '';
-          if (signUpUrl) {
-            pushLine(`Sign up: ${signUpUrl}`);
-          }
-        }
-        
-        pushLine(''); // Blank line after other teams
+      const neededByTime = {};
+      for (const np of neededForTeam) {
+        const timeKey = np.serviceTime ? np.serviceTime.toISOString() : 'TBD';
+        neededByTime[timeKey] = (neededByTime[timeKey] || 0) + (np.quantity || 1);
       }
+
+      const assignedByTime = {};
+      for (const member of confirmedOrPending) {
+        const timeKey = member.serviceTime ? member.serviceTime.toISOString() : 'TBD';
+        assignedByTime[timeKey] = (assignedByTime[timeKey] || 0) + 1;
+      }
+
+      const openByTime = {};
+      for (const timeKey in neededByTime) {
+        const open = neededByTime[timeKey] - (assignedByTime[timeKey] || 0);
+        if (open > 0) openByTime[timeKey] = open;
+      }
+
+      if (confirmedOrPending.length === 0 && Object.keys(openByTime).length === 0) {
+        continue;
+      }
+
+      pushLine(`👥 ${String(rule.label || rule.match).toUpperCase()}:`);
+
+      const allItems = [...confirmedOrPending.map((m) => ({ ...m, isOpen: false }))];
+      for (const timeKey in openByTime) {
+        const openCount = openByTime[timeKey];
+        const serviceTime = timeKey !== 'TBD' ? new Date(timeKey) : null;
+        for (let i = 0; i < openCount; i += 1) {
+          allItems.push({ serviceTime, isOpen: true });
+        }
+      }
+      allItems.sort(sortByTime);
+
+      for (const item of allItems) {
+        if (item.isOpen) addOpenPositionLine(item);
+        else addMemberLine(item);
+      }
+
+      if (Object.keys(openByTime).length > 0) {
+        const signUpUrl = getSignUpUrlForTeam(rule, rule.match);
+        if (signUpUrl) pushLine(`Sign up: ${signUpUrl}`);
+      }
+
+      pushLine('');
     }
   }
 

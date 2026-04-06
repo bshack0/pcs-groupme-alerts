@@ -5,9 +5,13 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "start:ui": "node ui.server.js",
+    "start:all": "node start-all.js",
     "dev": "nodemon index.js",
     "run-once": "node index.js --once",
-    "test-run": "node test-run.js"
+    "test-run": "node test-run.js",
+    "setup-check": "node setup-check.js",
+    "smoke-check": "node setup-check.js"
   },
   "keywords": [
     "planning-center",
@@ -23,6 +27,7 @@
     "date-fns": "^4.1.0",
     "date-fns-tz": "^3.2.0",
     "dotenv": "^17.2.3",
+    "express": "^5.2.1",
     "node-cron": "^4.2.1"
   },
   "devDependencies": {

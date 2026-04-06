@@ -46,6 +46,11 @@ async function getServiceTypes() {
   return data.data || [];
 }
 
+async function getTeamsForServiceType(serviceTypeId) {
+  const data = await requestWithRetry(`/service_types/${serviceTypeId}/teams`);
+  return data.data || [];
+}
+
 async function getPlansForDate(serviceTypeId, targetDate) {
   const start = startOfDay(targetDate);
   const end = endOfDay(targetDate);
@@ -365,6 +370,7 @@ function capitalizeType(type) {
 
 module.exports = {
   getServiceTypes,
+  getTeamsForServiceType,
   getPlansForDate,
   getPlansForWeekRange,
   getTeamMembersForPlan,
