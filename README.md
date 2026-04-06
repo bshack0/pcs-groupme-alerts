@@ -9,7 +9,7 @@ The bot pulls Planning Center Services assignments and open spots, then posts fo
 
 1. Install dependencies:
    - `npm install`
-2. Create `.env` next to `package.json` (template below).
+2. Copy `.env.example` to `.env.local` and fill values.
 3. Run setup validation:
    - `npm run setup-check`
 4. Dry-run a real message build:
@@ -17,7 +17,7 @@ The bot pulls Planning Center Services assignments and open spots, then posts fo
 5. Start scheduler:
    - `npm start`
 
-## .env Template
+## Environment Template
 
 ```env
 # Planning Center
@@ -71,9 +71,6 @@ DRY_RUN=false
 - `npm run run-once`  
   Executes one posting cycle immediately.
 
-- `npm run test-run`  
-  Sunday-focused debug run using test helper flow.
-
 - `npm start`  
   Starts hourly scheduler loop.
 
@@ -112,7 +109,7 @@ Recommended deployment pattern:
 - For Railway or similar:
   - set env vars in platform settings
   - deploy as a long-running worker/service
-  - start command: `npm start`
+  - start command: `npm run start:all`
 - For cron-style invocation:
   - run `npm run run-once` on your schedule
   - keep `DRY_RUN=true` until you verify output

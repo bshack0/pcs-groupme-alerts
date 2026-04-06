@@ -1,6 +1,10 @@
 const express = require('express');
 const fs = require('fs');
 const config = require('./config');
+const {
+  getServiceTypes,
+  getTeamsForServiceType,
+} = require('./services.planningCenter');
 
 const app = express();
 app.use(express.json());
@@ -51,6 +55,36 @@ app.post('/api/config', requireAuth, (req, res) => {
   return res.json({ ok: true, savedTo: config.localConfigPath });
 });
 
+app.get('/api/pco/service-types', requireAuth, async (_req, res) => {
+  try {
+    const serviceTypes = await getServiceTypes();
+    const items = serviceTypes.map((st) => ({
+      id: st.id,
+      name: st.attributes?.name || `Service Type ${st.id}`,
+    }));
+    res.json({ items });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Failed to load service types' });
+  }
+});
+
+app.get('/api/pco/teams', requireAuth, async (req, res) => {
+  const serviceTypeId = String(req.query.serviceTypeId || '').trim();
+  if (!serviceTypeId) {
+    return res.status(400).json({ error: 'serviceTypeId is required' });
+  }
+  try {
+    const teams = await getTeamsForServiceType(serviceTypeId);
+    const items = teams.map((t) => ({
+      id: t.id,
+      name: t.attributes?.name || `Team ${t.id}`,
+    }));
+    res.json({ items });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Failed to load teams' });
+  }
+});
+
 app.get('/ui', (_req, res) => {
   const html = `<!doctype html>
 <html>
@@ -59,35 +93,139 @@ app.get('/ui', (_req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>PCS GroupMe Admin</title>
   <style>
-    body { font-family: -apple-system, system-ui, sans-serif; max-width: 900px; margin: 32px auto; padding: 0 16px; }
-    h1 { margin-bottom: 8px; }
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 980px; margin: 24px auto; padding: 0 16px; color: #111; }
+    h1 { margin-bottom: 6px; }
     p { color: #444; }
-    textarea { width: 100%; min-height: 420px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+    .wizard { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-top: 16px; background: #fff; }
+    .stepper { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+    .stepDot { border: 1px solid #bbb; border-radius: 999px; padding: 6px 10px; font-size: 12px; color: #555; }
+    .stepDot.active { border-color: #5b3fd0; color: #5b3fd0; font-weight: 600; }
+    .step { display: none; }
+    .step.active { display: block; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .grid-1 { display: grid; grid-template-columns: 1fr; gap: 10px; }
+    label { display: block; font-size: 13px; margin-bottom: 4px; color: #222; }
+    input, select, textarea { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
+    textarea { min-height: 160px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    button { padding: 10px 14px; margin-right: 8px; cursor: pointer; border-radius: 6px; border: 1px solid #bbb; background: #f6f6f6; }
+    button.primary { background: #5b3fd0; border-color: #5b3fd0; color: #fff; }
+    button.ghost { background: #fff; }
     .row { margin: 12px 0; }
-    input[type="password"] { width: 100%; padding: 8px; }
-    button { padding: 10px 14px; margin-right: 8px; cursor: pointer; }
+    .actions { margin-top: 14px; }
+    .card { border: 1px solid #eee; border-radius: 8px; padding: 10px; margin-top: 8px; }
     .ok { color: #0a7a33; }
     .err { color: #b00020; }
+    .muted { color: #666; font-size: 12px; }
+    .teamItem { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+    .teamItem input[type="text"] { flex: 1; }
   </style>
 </head>
 <body>
-  <h1>PCS GroupMe Admin UI</h1>
-  <p>Edit runtime config for this deployed instance. Changes are saved to <code>config.local.json</code>.</p>
-  <p>Supported keys include: <code>PCO_APP_ID</code>, <code>PCO_SECRET</code>, <code>PCO_SERVICE_TYPE_ID</code>, <code>GROUPME_BOT_ID</code>, <code>GROUPME_ACCESS_TOKEN</code>, <code>GROUPME_GROUP_ID</code>, <code>GROUPME_DESTINATION_LABEL</code>, <code>TEAM_NAMES</code>, <code>TEAM_RULES</code>, <code>TEAM_SIGNUP_URLS</code>, <code>DRY_RUN</code>.</p>
+  <h1>PCS GroupMe Setup Builder</h1>
+  <p>Use this guided setup to configure a deployed instance. Settings are saved to <code>config.local.json</code>.</p>
   <div class="row">
-    <label>Admin token (only needed if UI_ADMIN_TOKEN is set)</label>
+    <label>Admin token (required only if <code>UI_ADMIN_TOKEN</code> is set)</label>
     <input id="token" type="password" />
   </div>
-  <div class="row">
-    <button id="loadBtn">Load</button>
-    <button id="saveBtn">Save</button>
-    <span id="status"></span>
+
+  <div class="wizard">
+    <div class="stepper">
+      <div class="stepDot active" data-step-dot="0">1. Credentials</div>
+      <div class="stepDot" data-step-dot="1">2. Planning Center</div>
+      <div class="stepDot" data-step-dot="2">3. Team Builder</div>
+      <div class="stepDot" data-step-dot="3">4. Review & Save</div>
+    </div>
+
+    <div class="step active" data-step="0">
+      <div class="grid">
+        <div>
+          <label>PCO_APP_ID</label>
+          <input id="pcoAppId" />
+        </div>
+        <div>
+          <label>PCO_SECRET</label>
+          <input id="pcoSecret" />
+        </div>
+        <div>
+          <label>GROUPME_BOT_ID</label>
+          <input id="groupMeBotId" />
+        </div>
+        <div>
+          <label>GROUPME_ACCESS_TOKEN</label>
+          <input id="groupMeAccessToken" />
+        </div>
+        <div>
+          <label>GROUPME_GROUP_ID (optional)</label>
+          <input id="groupMeGroupId" />
+        </div>
+        <div>
+          <label>GROUPME_DESTINATION_LABEL</label>
+          <input id="destinationLabel" />
+        </div>
+      </div>
+      <div class="actions">
+        <button class="primary" id="toStep1">Next</button>
+      </div>
+    </div>
+
+    <div class="step" data-step="1">
+      <div class="row">
+        <button class="ghost" id="loadServiceTypes">Load Service Types</button>
+      </div>
+      <div class="grid">
+        <div>
+          <label>Service Type</label>
+          <select id="serviceTypeSelect">
+            <option value="">Select a service type</option>
+          </select>
+        </div>
+        <div>
+          <label>DRY_RUN</label>
+          <select id="dryRun">
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="ghost" id="backTo0">Back</button>
+        <button class="primary" id="toStep2">Next</button>
+      </div>
+    </div>
+
+    <div class="step" data-step="2">
+      <div class="row">
+        <button class="ghost" id="loadTeams">Load Teams for Selected Service Type</button>
+      </div>
+      <div id="teamsContainer" class="card">
+        <div class="muted">No teams loaded yet.</div>
+      </div>
+      <div class="actions">
+        <button class="ghost" id="backTo1">Back</button>
+        <button class="primary" id="toStep3">Next</button>
+      </div>
+    </div>
+
+    <div class="step" data-step="3">
+      <p class="muted">Review generated config JSON, then save.</p>
+      <textarea id="reviewJson"></textarea>
+      <div class="actions">
+        <button class="ghost" id="backTo2">Back</button>
+        <button class="primary" id="saveConfig">Save Config</button>
+      </div>
+    </div>
   </div>
-  <textarea id="editor"></textarea>
+
+  <div class="row"><span id="status"></span></div>
+
   <script>
     const statusEl = document.getElementById('status');
     const tokenEl = document.getElementById('token');
-    const editorEl = document.getElementById('editor');
+    const stepEls = [...document.querySelectorAll('[data-step]')];
+    const dotEls = [...document.querySelectorAll('[data-step-dot]')];
+    let currentStep = 0;
+    let loadedTeams = [];
+    let loadedServiceTypes = [];
 
     function setStatus(text, ok) {
       statusEl.textContent = text;
@@ -101,24 +239,122 @@ app.get('/ui', (_req, res) => {
       return h;
     }
 
+    function gotoStep(idx) {
+      currentStep = idx;
+      stepEls.forEach((el, i) => el.classList.toggle('active', i === idx));
+      dotEls.forEach((el, i) => el.classList.toggle('active', i === idx));
+    }
+
+    function readField(id) {
+      return (document.getElementById(id).value || '').trim();
+    }
+
+    function writeField(id, value) {
+      document.getElementById(id).value = value || '';
+    }
+
+    function buildConfigFromForm() {
+      const selectedTeamRows = [...document.querySelectorAll('.teamRow')];
+      const teamRules = selectedTeamRows
+        .filter((row) => row.querySelector('.teamEnabled').checked)
+        .map((row) => ({
+          label: row.querySelector('.teamLabel').value.trim() || row.dataset.teamName,
+          match: row.dataset.teamName.toLowerCase(),
+          signUpUrl: row.querySelector('.teamSignUpUrl').value.trim(),
+        }));
+
+      return {
+        PCO_APP_ID: readField('pcoAppId'),
+        PCO_SECRET: readField('pcoSecret'),
+        PCO_SERVICE_TYPE_ID: readField('serviceTypeSelect'),
+        GROUPME_BOT_ID: readField('groupMeBotId'),
+        GROUPME_ACCESS_TOKEN: readField('groupMeAccessToken'),
+        GROUPME_GROUP_ID: readField('groupMeGroupId'),
+        GROUPME_DESTINATION_LABEL: readField('destinationLabel'),
+        TEAM_NAMES: teamRules.map((r) => r.label).join(','),
+        TEAM_RULES: teamRules,
+        DRY_RUN: readField('dryRun') || 'true',
+      };
+    }
+
+    function refreshReviewJson() {
+      const cfg = buildConfigFromForm();
+      document.getElementById('reviewJson').value = JSON.stringify(cfg, null, 2);
+    }
+
     async function load() {
-      setStatus('Loading...', true);
+      setStatus('Loading saved config...', true);
       const resp = await fetch('/api/config', { headers: headers() });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Failed to load config');
-      editorEl.value = JSON.stringify(data.data || {}, null, 2);
-      setStatus('Loaded config.local.json', true);
+      const cfg = data.data || {};
+
+      writeField('pcoAppId', cfg.PCO_APP_ID);
+      writeField('pcoSecret', cfg.PCO_SECRET);
+      writeField('groupMeBotId', cfg.GROUPME_BOT_ID);
+      writeField('groupMeAccessToken', cfg.GROUPME_ACCESS_TOKEN);
+      writeField('groupMeGroupId', cfg.GROUPME_GROUP_ID);
+      writeField('destinationLabel', cfg.GROUPME_DESTINATION_LABEL || 'Weekend Safety Alerts');
+      writeField('dryRun', String(cfg.DRY_RUN || 'true'));
+
+      if (cfg.PCO_SERVICE_TYPE_ID) {
+        const sel = document.getElementById('serviceTypeSelect');
+        const opt = document.createElement('option');
+        opt.value = cfg.PCO_SERVICE_TYPE_ID;
+        opt.textContent = cfg.PCO_SERVICE_TYPE_ID;
+        sel.appendChild(opt);
+        writeField('serviceTypeSelect', cfg.PCO_SERVICE_TYPE_ID);
+      }
+
+      if (Array.isArray(cfg.TEAM_RULES)) {
+        loadedTeams = cfg.TEAM_RULES.map((r) => ({ name: r.label || r.match, signUpUrl: r.signUpUrl || '' }));
+        renderTeamsFromRules(cfg.TEAM_RULES);
+      }
+
+      refreshReviewJson();
+      setStatus('Loaded saved config.local.json', true);
     }
 
-    async function save() {
-      let payload;
-      try {
-        payload = JSON.parse(editorEl.value || '{}');
-      } catch (err) {
-        setStatus('Invalid JSON: ' + err.message, false);
+    function renderTeams(items) {
+      const container = document.getElementById('teamsContainer');
+      if (!items || items.length === 0) {
+        container.innerHTML = '<div class="muted">No teams found for this service type.</div>';
         return;
       }
-      setStatus('Saving...', true);
+
+      container.innerHTML = items.map((team) => {
+        const safeName = String(team.name || '').replace(/"/g, '&quot;');
+        return '<div class="teamItem teamRow" data-team-name="' + safeName + '">' +
+          '<input class="teamEnabled" type="checkbox" checked />' +
+          '<input class="teamLabel" type="text" value="' + safeName + '" />' +
+          '<input class="teamSignUpUrl" type="text" placeholder="Optional sign-up URL" />' +
+          '</div>';
+      }).join('');
+    }
+
+    function renderTeamsFromRules(rules) {
+      const container = document.getElementById('teamsContainer');
+      container.innerHTML = rules.map((rule) => {
+        const label = String(rule.label || '').replace(/"/g, '&quot;');
+        const match = String(rule.match || label).replace(/"/g, '&quot;');
+        const signUpUrl = String(rule.signUpUrl || '').replace(/"/g, '&quot;');
+        return '<div class="teamItem teamRow" data-team-name="' + match + '">' +
+          '<input class="teamEnabled" type="checkbox" checked />' +
+          '<input class="teamLabel" type="text" value="' + label + '" />' +
+          '<input class="teamSignUpUrl" type="text" placeholder="Optional sign-up URL" value="' + signUpUrl + '" />' +
+          '</div>';
+      }).join('');
+    }
+
+    async function saveConfig() {
+      let payload;
+      try {
+        payload = JSON.parse(document.getElementById('reviewJson').value || '{}');
+      } catch (err) {
+        throw new Error('Review JSON is invalid: ' + err.message);
+      }
+
+      setStatus('Saving config...', true);
       const resp = await fetch('/api/config', {
         method: 'POST',
         headers: headers(),
@@ -126,18 +362,80 @@ app.get('/ui', (_req, res) => {
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Failed to save config');
-      setStatus('Saved to config.local.json', true);
+      setStatus('Saved builder config to config.local.json', true);
     }
 
-    document.getElementById('loadBtn').addEventListener('click', () => load().catch(err => setStatus(err.message, false)));
-    document.getElementById('saveBtn').addEventListener('click', () => save().catch(err => setStatus(err.message, false)));
+    async function loadServiceTypes() {
+      setStatus('Loading service types...', true);
+      const resp = await fetch('/api/pco/service-types', { headers: headers() });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to load service types');
+      loadedServiceTypes = data.items || [];
+      const sel = document.getElementById('serviceTypeSelect');
+      sel.innerHTML = '<option value="">Select a service type</option>';
+      loadedServiceTypes.forEach((st) => {
+        const opt = document.createElement('option');
+        opt.value = st.id;
+        opt.textContent = st.name + ' (' + st.id + ')';
+        sel.appendChild(opt);
+      });
+      setStatus('Service types loaded', true);
+    }
 
-    editorEl.value = JSON.stringify({
-      PCO_SERVICE_TYPE_ID: "",
-      TEAM_NAMES: "Security,Medical",
-      GROUPME_DESTINATION_LABEL: "Weekend Safety Alerts",
-      DRY_RUN: "true"
-    }, null, 2);
+    async function loadTeams() {
+      const serviceTypeId = readField('serviceTypeSelect');
+      if (!serviceTypeId) throw new Error('Select a service type first');
+
+      setStatus('Loading teams...', true);
+      const resp = await fetch('/api/pco/teams?serviceTypeId=' + encodeURIComponent(serviceTypeId), {
+        headers: headers(),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to load teams');
+
+      loadedTeams = data.items || [];
+      renderTeams(loadedTeams);
+      refreshReviewJson();
+      setStatus('Teams loaded. Select teams and optional sign-up URLs.', true);
+    }
+
+    document.getElementById('toStep1').addEventListener('click', () => {
+      gotoStep(1);
+      refreshReviewJson();
+    });
+    document.getElementById('backTo0').addEventListener('click', () => gotoStep(0));
+    document.getElementById('toStep2').addEventListener('click', () => {
+      gotoStep(2);
+      refreshReviewJson();
+    });
+    document.getElementById('backTo1').addEventListener('click', () => gotoStep(1));
+    document.getElementById('toStep3').addEventListener('click', () => {
+      refreshReviewJson();
+      gotoStep(3);
+    });
+    document.getElementById('backTo2').addEventListener('click', () => gotoStep(2));
+
+    document.getElementById('loadServiceTypes')
+      .addEventListener('click', () => loadServiceTypes().catch((err) => setStatus(err.message, false)));
+    document.getElementById('loadTeams')
+      .addEventListener('click', () => loadTeams().catch((err) => setStatus(err.message, false)));
+    document.getElementById('saveConfig')
+      .addEventListener('click', () => saveConfig().catch((err) => setStatus(err.message, false)));
+
+    ['pcoAppId','pcoSecret','groupMeBotId','groupMeAccessToken','groupMeGroupId','destinationLabel','serviceTypeSelect','dryRun']
+      .forEach((id) => {
+        document.getElementById(id).addEventListener('input', refreshReviewJson);
+        document.getElementById(id).addEventListener('change', refreshReviewJson);
+      });
+    document.getElementById('teamsContainer').addEventListener('input', refreshReviewJson);
+    document.getElementById('teamsContainer').addEventListener('change', refreshReviewJson);
+
+    load().catch(() => {
+      writeField('destinationLabel', 'Weekend Safety Alerts');
+      writeField('dryRun', 'true');
+      refreshReviewJson();
+      setStatus('No saved config found yet. Use builder to create one.', true);
+    });
   </script>
 </body>
 </html>`;
@@ -156,7 +454,9 @@ function startUiServer(port = PORT) {
 }
 
 if (require.main === module) {
-  startUiServer();
+  const activeUiServer = startUiServer();
+  // Keep a strong reference in standalone mode.
+  global.__pcsGroupmeUiServer = activeUiServer;
 }
 
 module.exports = { app, startUiServer };
